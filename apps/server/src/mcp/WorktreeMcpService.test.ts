@@ -6,6 +6,8 @@ import {
   type OrchestrationV2ThreadProjection,
   type Project,
   ProjectId,
+  ProjectScriptPortUnavailableError,
+  type ProjectScript,
   ProviderInstanceId,
   ThreadId,
   WorktreeMcpHandoffInput,
@@ -26,6 +28,7 @@ import {
 } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectScriptPorts from "../project/ProjectScriptPorts.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
@@ -91,6 +94,9 @@ interface HarnessOptions {
   readonly currentBranch?: string | null;
   readonly notARepo?: boolean;
   readonly newWorktreesStartFromOrigin?: boolean;
+  readonly scripts?: ReadonlyArray<ProjectScript>;
+  readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+  readonly previewPortFails?: boolean;
   readonly setupScript?: "started" | "no-script" | "fails" | "dies";
   readonly dispatchFails?: boolean;
   readonly dispatchDies?: boolean;
@@ -192,7 +198,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
       ? (Effect.fail("simulated project read failure") as never)
       : Effect.succeed(
           id === projectId && options.projectMissing !== true
-            ? Option.some(project)
+            ? Option.some({ ...project, scripts: options.scripts ?? project.scripts })
             : Option.none(),
         ),
   );
@@ -285,6 +291,11 @@ const makeHarness = (options: HarnessOptions = {}) => {
     }
   });
 
+  const reserve = vi.fn((_input: { readonly cwd: string; readonly scriptId: string }) =>
+    options.previewPortFails
+      ? Effect.fail(new ProjectScriptPortUnavailableError({ startPort: 20000, attempts: 10000 }))
+      : Effect.succeed(43123),
+  );
   const layer = WorktreeMcpService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -298,7 +309,9 @@ const makeHarness = (options: HarnessOptions = {}) => {
         } satisfies Partial<ProjectService.ProjectService["Service"]>),
         ServerSettings.layerTest({
           newWorktreesStartFromOrigin: options.newWorktreesStartFromOrigin ?? false,
+          ...options.settings,
         }),
+        Layer.mock(ProjectScriptPorts.ProjectScriptPorts)({ reserve }),
         Layer.mock(GitWorkflowService.GitWorkflowService)({
           listRefs,
           listLocalBranchNames,
@@ -332,6 +345,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
     deleteLocalBranch,
     localStatus,
     runForThread,
+    reserve,
   };
 };
 
@@ -915,6 +929,71 @@ describe("t3_worktree_handoff", () => {
 });
 
 describe("t3_worktree_status", () => {
+  it.effect("WorktreeStatus-WithEffectivePreviewScripts-ReservesPortsInTheThreadWorkspace", () =>
+    Effect.gen(function* () {
+      const previewScript: ProjectScript = {
+        id: "preview",
+        name: "Preview",
+        command: "vp dev",
+        icon: "play",
+        runOnWorktreeCreate: false,
+        reservePort: true,
+        previewUrl: "http://localhost:${T3CODE_PREVIEW_PORT}/preview",
+      };
+      const effectiveScripts = [
+        previewScript,
+        { ...previewScript, id: "fixed", reservePort: false },
+        { ...previewScript, id: "no-preview", previewUrl: undefined },
+      ];
+      for (const worktreePath of [null, "/worktrees/project/existing"]) {
+        const harness = makeHarness({
+          thread: { worktreePath },
+          scripts: [{ ...previewScript, id: "project-script" }],
+          settings: worktreePath
+            ? {
+                projectSettingsOverrides: {
+                  [projectId]: { defaultProjectScripts: effectiveScripts },
+                },
+              }
+            : {
+                defaultProjectScripts: effectiveScripts,
+                projectSettingsFolded: true,
+              },
+        });
+        const result = yield* runStatus(harness);
+        expect(result.scriptPreviews).toEqual([
+          {
+            scriptId: "preview",
+            name: "Preview",
+            port: 43123,
+            url: "http://localhost:43123/preview",
+          },
+        ]);
+        expect(harness.reserve.mock.calls).toEqual([
+          [
+            {
+              cwd: worktreePath ?? workspaceRoot,
+              scriptId: "preview",
+            },
+          ],
+        ]);
+        expect(harness.runForThread).not.toHaveBeenCalled();
+      }
+      const unavailable = makeHarness({
+        thread: { worktreePath: "/worktrees/project/existing", branch: "feature/existing" },
+        scripts: [previewScript],
+        previewPortFails: true,
+      });
+      expect(yield* runStatus(unavailable)).toMatchObject({
+        attached: true,
+        worktreePath: "/worktrees/project/existing",
+        branch: "feature/existing",
+        projectWorkspaceRoot: workspaceRoot,
+        scriptPreviews: [],
+      });
+    }),
+  );
+
   it.effect("reports an unattached thread", () => {
     const harness = makeHarness({ newWorktreesStartFromOrigin: true });
     return Effect.gen(function* () {
@@ -925,6 +1004,7 @@ describe("t3_worktree_status", () => {
         branch: null,
         projectWorkspaceRoot: workspaceRoot,
         defaultStartFromOrigin: true,
+        scriptPreviews: [],
       });
     });
   });

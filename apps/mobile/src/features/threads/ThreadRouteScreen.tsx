@@ -4,6 +4,10 @@ import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
 import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
 import { useWorktreeSetup } from "./use-worktree-setup";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { AppBar } from "../../components/ui/AppBar";
 import {
   StackActions,
@@ -24,7 +28,9 @@ import {
 } from "@t3tools/contracts";
 import {
   projectScriptCwd,
+  projectScriptReservesPort,
   projectScriptRuntimeEnv,
+  projectScriptTerminalId,
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
 import { Platform, ScrollView, View } from "react-native";
@@ -74,6 +80,7 @@ import { useThreadComposerState } from "../../state/use-thread-composer-state";
 import { resolveMergeBackTargetThreadId } from "@t3tools/client-runtime/state/thread-relationships";
 import { resolveLatestMergeBackRun } from "@t3tools/client-runtime/state/thread-workflows";
 import { threadEnvironment } from "../../state/threads";
+import { projectEnvironment } from "../../state/projects";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import {
@@ -290,6 +297,7 @@ function ThreadRouteContent(
   const gitActions = useSelectedThreadGitActions();
   const requests = useSelectedThreadRequests();
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, "thread interrupt");
+  const getScriptPorts = useAtomCommand(projectEnvironment.getScriptPorts, "assign script port");
   const loadEarlierHistory = useAtomCommand(threadEnvironment.loadEarlierHistory, {
     label: "load earlier thread history",
     reportFailure: false,
@@ -446,6 +454,10 @@ function ThreadRouteContent(
   const { sessions: knownTerminalSessions } = useKnownTerminalSessions({
     environmentId: selectedThread?.environmentId ?? null,
     threadId: selectedThread?.id ?? null,
+  });
+  const { sessions: knownEnvironmentTerminalSessions } = useKnownTerminalSessions({
+    environmentId: selectedThread?.environmentId ?? null,
+    threadId: null,
   });
   const terminalMenuSessions = useMemo(
     () =>
@@ -709,16 +721,6 @@ function ThreadRouteContent(
         return;
       }
 
-      const targetTerminalId = resolveProjectScriptTerminalId({
-        existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
-        ...(knownTerminalSessions === null ||
-        !readEnvironmentScope(selectedThread.environmentId, AuthTerminalReadScope)
-          ? { uniqueSuffix: uuidv4() }
-          : {}),
-        hasRunningTerminal: terminalMenuSessions.some(
-          (session) => session.status === "running" || session.status === "starting",
-        ),
-      });
       const preferredWorktreePath = resolvePreferredThreadWorktreePath({
         threadShellWorktreePath: selectedThread.worktreePath ?? null,
         threadDetailWorktreePath: selectedThreadDetailWorktreePath,
@@ -727,9 +729,56 @@ function ThreadRouteContent(
         project: { cwd: selectedThreadProject.workspaceRoot },
         worktreePath: preferredWorktreePath,
       });
+      let port: number | undefined;
+      if (projectScriptReservesPort(script)) {
+        const result = await getScriptPorts({
+          environmentId: selectedThread.environmentId,
+          input: { cwd, scriptIds: [script.id] },
+        });
+        if (result._tag !== "Success") {
+          if (!isAtomCommandInterrupted(result)) {
+            Dialog.alert("Couldn't run script", String(squashAtomCommandFailure(result)));
+          }
+          return;
+        }
+        port = result.value.ports[script.id];
+      }
+      const targetTerminalId =
+        port !== undefined
+          ? projectScriptTerminalId(port)
+          : resolveProjectScriptTerminalId({
+              existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
+              ...(knownTerminalSessions === null ||
+              !readEnvironmentScope(selectedThread.environmentId, AuthTerminalReadScope)
+                ? { uniqueSuffix: uuidv4() }
+                : {}),
+              hasRunningTerminal: terminalMenuSessions.some(
+                (session) => session.status === "running" || session.status === "starting",
+              ),
+            });
+      const runningScriptTerminal =
+        port === undefined
+          ? undefined
+          : knownEnvironmentTerminalSessions?.find(
+              (session) =>
+                session.target.terminalId === targetTerminalId &&
+                (session.state.status === "starting" || session.state.hasRunningSubprocess),
+            );
+      if (runningScriptTerminal) {
+        if (runningScriptTerminal.target.threadId === selectedThread.id) {
+          handleOpenTerminal(targetTerminalId);
+        } else {
+          Dialog.alert(
+            "Already running",
+            `${script.name} is running in another thread for this checkout.`,
+          );
+        }
+        return;
+      }
       const env = projectScriptRuntimeEnv({
         project: { cwd: selectedThreadProject.workspaceRoot },
         worktreePath: preferredWorktreePath,
+        ...(port !== undefined ? { extraEnv: { T3CODE_PREVIEW_PORT: String(port) } } : {}),
       });
       stagePendingTerminalLaunch({
         target: {
@@ -758,12 +807,15 @@ function ThreadRouteContent(
       });
     },
     [
+      getScriptPorts,
+      handleOpenTerminal,
       navigation,
       selectedThread,
       selectedThreadDetailWorktreePath,
       selectedThreadProject,
       terminalMenuSessions,
       knownTerminalSessions,
+      knownEnvironmentTerminalSessions,
     ],
   );
   const threadGitControlProps = {

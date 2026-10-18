@@ -1,6 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
-import { ProjectId } from "@t3tools/contracts";
+import { ProjectId, type TerminalSummary } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -9,9 +9,11 @@ import * as Option from "effect/Option";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectService from "./ProjectService.ts";
+import * as ProjectScriptPorts from "./ProjectScriptPorts.ts";
 import * as ProjectSetupScriptRunner from "./ProjectSetupScriptRunner.ts";
 
 it.effect("resolves setup scripts through the standalone project service", () => {
+  let terminalMetadata: ReadonlyArray<TerminalSummary> = [];
   const open = vi.fn((input: Parameters<TerminalManager.TerminalManager["Service"]["open"]>[0]) =>
     Effect.succeed({
       threadId: input.threadId,
@@ -41,6 +43,9 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       return () => undefined;
     });
   const projectId = ProjectId.make("project:setup-runner-v2");
+  const reserve = vi.fn((_input: { readonly cwd: string; readonly scriptId: string }) =>
+    Effect.succeed(43123),
+  );
   const project = {
     id: projectId,
     title: "Project",
@@ -75,8 +80,15 @@ it.effect("resolves setup scripts through the standalone project service", () =>
         Layer.mock(ProjectService.ProjectService)({
           getById: () => Effect.succeed(Option.some(project)),
         }),
-        Layer.mock(TerminalManager.TerminalManager)({ open, write, subscribe, closeIdle }),
+        Layer.mock(TerminalManager.TerminalManager)({
+          open,
+          write,
+          subscribe,
+          closeIdle,
+          readMetadata: Effect.suspend(() => Effect.succeed(terminalMetadata)),
+        }),
         ServerSettings.layerTest(),
+        Layer.mock(ProjectScriptPorts.ProjectScriptPorts)({ reserve }),
         NodeCrypto.layer,
       ),
     ),
@@ -107,6 +119,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       FORCE_COLOR: "0",
     });
     assert.equal(write.mock.calls[0]?.[0].data, "vp install\r");
+    assert.equal(reserve.mock.calls.length, 0);
     const lines: string[] = [];
     const observed = yield* runner.runForThread({
       threadId: "thread-1",
@@ -175,5 +188,78 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       threadId: "thread-1",
       terminalId: observedTerminalId,
     });
+
+    const previewProject = {
+      ...project,
+      scripts: [
+        {
+          ...project.scripts[0]!,
+          runOnWorktreeCreate: true,
+          runOnSettle: true,
+          reservePort: true,
+          previewUrl: "http://localhost:${T3CODE_PREVIEW_PORT}",
+        },
+      ],
+    };
+    for (const trigger of ["setup", "settle", "settle"] as const) {
+      const openCount = open.mock.calls.length;
+      const writeCount = write.mock.calls.length;
+      const preview = yield* runner.runForThread({
+        threadId: "thread-preview",
+        project: previewProject,
+        worktreePath: "/repo-worktree",
+        trigger,
+        ...(trigger === "settle" ? { observeCompletion: {} } : {}),
+      });
+      assert.equal(preview.status, "started");
+      if (preview.status !== "started") return;
+      assert.equal(preview.terminalId, "script-43123");
+      assert.deepEqual(reserve.mock.calls.at(-1)?.[0], {
+        cwd: "/repo-worktree",
+        scriptId: "setup",
+      });
+      assert.deepEqual(open.mock.calls.at(-1)?.[0].env, {
+        T3CODE_PROJECT_ROOT: "/repo",
+        T3CODE_WORKTREE_PATH: "/repo-worktree",
+        T3CODE_PREVIEW_PORT: "43123",
+        COLORTERM: "",
+        NO_COLOR: "1",
+        FORCE_COLOR: "0",
+      });
+      if (trigger === "settle") {
+        assert.equal(open.mock.calls.length, openCount);
+        assert.equal(write.mock.calls.length, writeCount);
+        assert.equal(preview.async, true);
+        assert.deepEqual(yield* preview.completion!, { exitCode: 0, durationMs: 0 });
+      }
+      terminalMetadata = [
+        {
+          threadId: "thread-preview",
+          terminalId: preview.terminalId,
+          cwd: preview.cwd,
+          worktreePath: preview.cwd,
+          status: trigger === "setup" ? "starting" : "running",
+          hasRunningSubprocess: trigger !== "setup",
+          pid: 123,
+          exitCode: null,
+          exitSignal: null,
+          label: "Preview",
+          updatedAt: "2026-06-20T00:00:00.000Z",
+        },
+      ];
+    }
+    const openCount = open.mock.calls.length;
+    const writeCount = write.mock.calls.length;
+    assert.deepEqual(
+      yield* runner.runForThread({
+        threadId: "thread-other",
+        project: previewProject,
+        worktreePath: "/repo-worktree",
+        trigger: "settle",
+      }),
+      { status: "no-script" },
+    );
+    assert.equal(open.mock.calls.length, openCount);
+    assert.equal(write.mock.calls.length, writeCount);
   }).pipe(Effect.provide(layer));
 });

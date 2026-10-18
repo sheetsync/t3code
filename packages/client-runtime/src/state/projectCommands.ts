@@ -99,6 +99,15 @@ export function createProjectEnvironmentAtoms<R, E>(
       JSON.stringify([environmentId, input.projectId]),
   };
   return {
+    getScriptPorts: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:get-script-ports",
+      tag: WS_METHODS.projectsGetScriptPorts,
+    }),
+    scriptPorts: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:projects:script-ports",
+      tag: WS_METHODS.projectsGetScriptPorts,
+      staleTimeMs: Infinity,
+    }),
     fileMetadata: fileMetadata.metadata,
     fileMetadataThread: fileMetadata.retainThread,
     invalidateFileMetadata: createEnvironmentCommand(runtime, {

@@ -22,6 +22,11 @@ import {
   ChatGptHandoffState,
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
+import {
+  ProjectScriptPortsInput,
+  ProjectScriptPortsResult,
+  ProjectScriptPortUnavailableError,
+} from "./projectScriptPorts.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
@@ -379,6 +384,7 @@ export const WS_METHODS = {
   projectsReadFile: "projects.readFile",
   projectsSearchContents: "projects.searchContents",
   projectsSearchEntries: "projects.searchEntries",
+  projectsGetScriptPorts: "projects.getScriptPorts",
   projectsWriteFile: "projects.writeFile",
   projectsMutate: "projects.mutate",
   projectsEnsureScratch: "projects.ensureScratch",
@@ -1195,6 +1201,12 @@ const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
   error: Schema.Union([ProjectSearchEntriesError, EnvironmentAuthorizationError]),
 });
 
+const WsProjectsGetScriptPortsRpc = Rpc.make(WS_METHODS.projectsGetScriptPorts, {
+  payload: ProjectScriptPortsInput,
+  success: ProjectScriptPortsResult,
+  error: Schema.Union([ProjectScriptPortUnavailableError, EnvironmentAuthorizationError]),
+});
+
 const WsProjectsSearchContentsRpc = Rpc.make(WS_METHODS.projectsSearchContents, {
   payload: ProjectSearchContentsInput,
   success: ProjectSearchContentsResult,
@@ -1962,6 +1974,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsReadFileRpc,
   WsProjectsSearchContentsRpc,
   WsProjectsSearchEntriesRpc,
+  WsProjectsGetScriptPortsRpc,
   WsProjectsEnsureScratchRpc,
   WsProjectsCreateNewRpc,
   WsProjectsWriteFileRpc,

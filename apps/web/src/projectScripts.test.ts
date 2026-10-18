@@ -19,30 +19,35 @@ import {
 } from "./projectScripts";
 
 describe("projectScripts helpers", () => {
-  it("builds scripts with preview settings", () => {
-    expect(
-      buildProjectScript("dev", {
+  it.each([false, true])(
+    "buildProjectScript-withPreviewUrl-persistsPortOptIn (%s)",
+    (reservePort) => {
+      expect(
+        buildProjectScript("dev", {
+          name: "Dev server",
+          command: "pnpm dev",
+          icon: "debug",
+          runOnWorktreeCreate: false,
+          waitForSetup: false,
+          runOnSettle: false,
+          previewUrl: "http://localhost:${T3CODE_PREVIEW_PORT}",
+          reservePort,
+          autoOpenPreview: true,
+        }),
+      ).toEqual({
+        id: "dev",
         name: "Dev server",
         command: "pnpm dev",
         icon: "debug",
         runOnWorktreeCreate: false,
-        waitForSetup: false,
-        runOnSettle: false,
-        previewUrl: "http://localhost:5733",
+        previewUrl: "http://localhost:${T3CODE_PREVIEW_PORT}",
+        ...(reservePort ? { reservePort: true } : {}),
         autoOpenPreview: true,
-      }),
-    ).toEqual({
-      id: "dev",
-      name: "Dev server",
-      command: "pnpm dev",
-      icon: "debug",
-      runOnWorktreeCreate: false,
-      previewUrl: "http://localhost:5733",
-      autoOpenPreview: true,
-    });
-  });
+      });
+    },
+  );
 
-  it("omits preview settings when no preview URL is configured", () => {
+  it("buildProjectScript-withoutPreviewUrl-omitsReservation", () => {
     expect(
       buildProjectScript("test", {
         name: "Test",
@@ -52,6 +57,7 @@ describe("projectScripts helpers", () => {
         waitForSetup: false,
         runOnSettle: false,
         previewUrl: null,
+        reservePort: true,
         autoOpenPreview: false,
       }),
     ).toEqual({
@@ -69,6 +75,7 @@ describe("projectScripts helpers", () => {
       command: "pnpm i",
       icon: "configure",
       previewUrl: null,
+      reservePort: false,
       autoOpenPreview: false,
       runOnSettle: false,
     } as const;
@@ -168,6 +175,7 @@ describe("projectScripts helpers", () => {
       icon: "play",
       waitForSetup: false,
       previewUrl: null,
+      reservePort: false,
       autoOpenPreview: false,
     } as const;
     const holder = {

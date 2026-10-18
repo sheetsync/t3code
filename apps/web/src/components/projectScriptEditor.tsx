@@ -6,6 +6,7 @@ import {
   type ProjectScriptIcon,
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
+import { projectScriptReservesPort } from "@t3tools/shared/projectScripts";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -94,6 +95,7 @@ export interface NewProjectScriptInput {
   /** Omit to preserve the current shortcut when the form did not edit it. */
   keybinding?: string | null;
   previewUrl: string | null;
+  reservePort: boolean;
   autoOpenPreview: boolean;
 }
 
@@ -108,6 +110,7 @@ export const EMPTY_PROJECT_SCRIPT_INPUT: NewProjectScriptInput = {
   runOnSettle: false,
   keybinding: null,
   previewUrl: null,
+  reservePort: false,
   autoOpenPreview: false,
 };
 
@@ -132,6 +135,7 @@ export function editorRequestForScript(
       runOnSettle: script.runOnSettle ?? false,
       keybinding: keybindingValueForCommand(keybindings, commandForProjectScript(script.id)),
       previewUrl: script.previewUrl ?? null,
+      reservePort: projectScriptReservesPort(script),
       autoOpenPreview: script.autoOpenPreview ?? false,
     },
   };
@@ -270,6 +274,7 @@ function ProjectScriptEditorForm({
   const [runOnSettle, setRunOnSettle] = useState(false);
   const [keybinding, setKeybinding] = useState("");
   const [previewUrl, setPreviewUrl] = useState("");
+  const [reservePort, setReservePort] = useState(false);
   const [autoOpenPreview, setAutoOpenPreview] = useState(false);
   const [savingRequest, setSavingRequest] = useState<ProjectScriptEditorRequest | null>(null);
   const pendingSubmissionRef = useRef<{ request: ProjectScriptEditorRequest } | null>(null);
@@ -299,6 +304,7 @@ function ProjectScriptEditorForm({
       setRunOnSettle(request.initial.runOnSettle);
       setKeybinding(request.initial.keybinding ?? "");
       setPreviewUrl(request.initial.previewUrl ?? "");
+      setReservePort(projectScriptReservesPort(request.initial));
       setAutoOpenPreview(request.initial.autoOpenPreview);
       setSavingRequest(null);
     }
@@ -375,6 +381,7 @@ function ProjectScriptEditorForm({
           ? { keybinding: keybindingRule?.key ?? null }
           : {}),
         previewUrl: trimmedPreviewUrl.length > 0 ? trimmedPreviewUrl : null,
+        reservePort: projectScriptReservesPort({ previewUrl: trimmedPreviewUrl, reservePort }),
         autoOpenPreview: trimmedPreviewUrl.length > 0 ? autoOpenPreview : false,
       } satisfies NewProjectScriptInput;
     } catch (error) {
@@ -501,7 +508,10 @@ function ProjectScriptEditorForm({
                 id="script-preview-url"
                 placeholder="http://localhost:5173"
                 value={previewUrl}
-                onChange={(event) => setPreviewUrl(event.target.value)}
+                onChange={(event) => {
+                  setPreviewUrl(event.target.value);
+                  if (event.target.value.trim().length === 0) setReservePort(false);
+                }}
               />
               <p className="text-xs text-muted-foreground">
                 Open this URL in the in-app preview when this action runs.
@@ -531,6 +541,24 @@ function ProjectScriptEditorForm({
               <Switch
                 checked={runOnSettle}
                 onCheckedChange={(checked) => setRunOnSettle(Boolean(checked))}
+              />
+            </label>
+            <label
+              className={`flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035] ${
+                previewUrl.trim().length === 0 ? "opacity-60" : ""
+              }`}
+            >
+              <span>
+                Reserve a port
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  Sets the command's <code>T3CODE_PREVIEW_PORT</code> environment variable. Use{" "}
+                  <code>{"${T3CODE_PREVIEW_PORT}"}</code> in the Preview URL.
+                </span>
+              </span>
+              <Switch
+                checked={reservePort}
+                disabled={previewUrl.trim().length === 0}
+                onCheckedChange={(checked) => setReservePort(Boolean(checked))}
               />
             </label>
             <label

@@ -2,6 +2,8 @@ import { ProjectId, type ProjectScript } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   projectScriptRuntimeEnv,
+  projectScriptReservesPort,
+  projectScriptTerminalId,
   resolveProjectScripts,
   settleProjectScript,
   setupProjectScript,
@@ -19,6 +21,7 @@ import * as Schema from "effect/Schema";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ProjectService from "./ProjectService.ts";
+import * as ProjectScriptPorts from "./ProjectScriptPorts.ts";
 
 export interface ProjectSetupScriptRunnerResultNoScript {
   readonly status: "no-script";
@@ -75,7 +78,13 @@ export class ProjectSetupScriptOperationError extends Schema.TaggedError<Project
     projectId: Schema.optional(Schema.String),
     projectCwd: Schema.optional(Schema.String),
     worktreePath: Schema.String,
-    operation: Schema.Literals(["resolveProject", "readSettings", "openTerminal", "writeCommand"]),
+    operation: Schema.Literals([
+      "resolveProject",
+      "readSettings",
+      "reservePort",
+      "openTerminal",
+      "writeCommand",
+    ]),
     cause: Schema.Defect(),
   },
 ) {
@@ -184,6 +193,7 @@ export const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const terminalManager = yield* TerminalManager.TerminalManager;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const scriptPorts = yield* ProjectScriptPorts.ProjectScriptPorts;
   const crypto = yield* Crypto.Crypto;
   const completionShell = resolveCompletionShell(
     yield* HostProcess.Platform,
@@ -345,18 +355,63 @@ export const make = Effect.gen(function* () {
       } as const;
     }
 
-    // A thread settles again after it is resumed, and an earlier settle shell
-    // may still be busy; typing into it would feed its foreground program.
-    const terminalId =
-      input.preferredTerminalId ??
-      (trigger === "settle"
-        ? `settle-${script.id}-${(yield* crypto.randomUUIDv4().pipe(Effect.orDie)).slice(0, 8)}`
-        : `setup-${script.id}`);
     const cwd = input.worktreePath;
+    const port = projectScriptReservesPort(script)
+      ? yield* scriptPorts.reserve({ cwd, scriptId: script.id }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProjectSetupScriptOperationError({
+                ...errorContext,
+                operation: "reservePort",
+                cause,
+              }),
+          ),
+        )
+      : undefined;
+    // Preview actions share their terminal across manual and lifecycle runs.
+    // Other settle scripts may still be busy when a thread settles again.
+    const terminalId =
+      port !== undefined
+        ? projectScriptTerminalId(port)
+        : (input.preferredTerminalId ??
+          (trigger === "settle"
+            ? `settle-${script.id}-${(yield* crypto.randomUUIDv4().pipe(Effect.orDie)).slice(0, 8)}`
+            : `setup-${script.id}`));
+    const result = {
+      status: "started",
+      scriptId: script.id,
+      scriptName: script.name,
+      scriptCommand: script.command,
+      terminalId,
+      cwd,
+      async: script.async !== false,
+    } as const;
+    if (port !== undefined) {
+      const terminals = yield* terminalManager.readMetadata;
+      const activeTerminal = terminals.find(
+        (terminal) =>
+          terminal.terminalId === terminalId &&
+          terminal.cwd === cwd &&
+          (terminal.hasRunningSubprocess || terminal.status === "starting"),
+      );
+      if (activeTerminal && activeTerminal.threadId !== input.threadId) {
+        return { status: "no-script" } as const;
+      }
+      if (activeTerminal) {
+        return {
+          ...result,
+          async: true,
+          ...(input.observeCompletion
+            ? { completion: Effect.succeed({ exitCode: 0, durationMs: 0 }) }
+            : {}),
+        } as const;
+      }
+    }
     const env = {
       ...projectScriptRuntimeEnv({
         project: { cwd: project.workspaceRoot },
         worktreePath: input.worktreePath,
+        ...(port === undefined ? {} : { extraEnv: { T3CODE_PREVIEW_PORT: String(port) } }),
       }),
       // Setup can run before a client attaches. Truecolor probes in tools such
       // as Vite+ wait for terminal replies that nobody can send at that point.
@@ -433,13 +488,7 @@ export const make = Effect.gen(function* () {
     );
 
     return {
-      status: "started",
-      scriptId: script.id,
-      scriptName: script.name,
-      scriptCommand: script.command,
-      terminalId,
-      cwd,
-      async: script.async !== false,
+      ...result,
       ...(completion ? { completion } : {}),
     } as const;
   });

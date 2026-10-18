@@ -180,6 +180,7 @@ import { makePersistedServerRuntimeState } from "./serverRuntimeState.ts";
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
 import * as NetService from "@t3tools/shared/Net";
+import * as ProjectScriptPorts from "./project/ProjectScriptPorts.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
 import * as ServerActivation from "./serverActivation.ts";
@@ -593,6 +594,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.provideMerge(layerGit),
   Layer.provideMerge(layerVcs),
   Layer.provideMerge(Layer.mergeAll(layerTerminal, layerPreview, layerDevice)),
+  Layer.provideMerge(ProjectScriptPorts.layer),
   Layer.provideMerge(layerPersistence),
   Layer.provideMerge(
     Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),

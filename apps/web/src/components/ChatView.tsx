@@ -124,7 +124,14 @@ import {
   resolvePromptInjectedEffort,
   resolveSelectableModel,
 } from "@t3tools/shared/model";
-import { projectScriptCwd, resolveProjectScripts } from "@t3tools/shared/projectScripts";
+import {
+  projectScriptCwd,
+  projectScriptPreviewUrl,
+  projectScriptReservesPort,
+  projectScriptTerminalId,
+  resolveProjectScripts,
+} from "@t3tools/shared/projectScripts";
+import { projectEnvironment } from "../state/projects";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import {
@@ -1091,6 +1098,9 @@ export default function ChatView(props: ChatViewProps) {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
+  const getScriptPorts = useAtomCommand(projectEnvironment.getScriptPorts, {
+    reportFailure: false,
+  });
   const { environments } = useEnvironments();
   const providersByEnvironment = useEnvironmentProviders();
   const primaryEnvironment = usePrimaryEnvironment();
@@ -1525,15 +1535,15 @@ export default function ChatView(props: ChatViewProps) {
     environmentId: activeThread?.environmentId ?? null,
     threadId: activeThreadId,
   });
-  const activeThreadKnownSessionsRaw = useKnownTerminalSessions({
+  const knownEnvironmentTerminalSessions = useKnownTerminalSessions({
     environmentId: activeThread?.environmentId ?? null,
-    threadId: activeThreadId,
+    threadId: null,
   });
   const activeThreadKnownSessions = (() => {
-    if (activeThreadId === null || activeThreadKnownSessionsRaw === null) {
+    if (activeThreadId === null || knownEnvironmentTerminalSessions === null) {
       return [];
     }
-    return activeThreadKnownSessionsRaw.filter(
+    return knownEnvironmentTerminalSessions.filter(
       (session) => session.target.threadId === activeThreadId,
     );
   })();
@@ -1634,7 +1644,7 @@ export default function ChatView(props: ChatViewProps) {
       surface.kind === "terminal" ? surface.terminalIds : [],
     ),
   );
-  const canReuseTerminal = activeThreadKnownSessionsRaw !== null;
+  const canReuseTerminal = knownEnvironmentTerminalSessions !== null;
   const previewPanelOpen = activeRightPanelKind === "preview" && browserAvailable;
   const rightPanelOpen = rightPanelState.isOpen;
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
@@ -1903,7 +1913,24 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
   const handleFilePendingChangeStable = useStableCallback(handleFilePendingChange);
-  const configuredPreviewUrls = getConfiguredPreviewUrls(activeProjectScripts);
+  const previewScriptIds = activeProjectScripts
+    .filter(projectScriptReservesPort)
+    .map((script) => script.id);
+  const scriptPorts = useEnvironmentQuery(
+    activeThreadRef && activeProject && previewScriptIds.length > 0
+      ? projectEnvironment.scriptPorts({
+          environmentId: activeThreadRef.environmentId,
+          input: {
+            cwd: activeThread?.worktreePath ?? activeProject.workspaceRoot,
+            scriptIds: previewScriptIds,
+          },
+        })
+      : null,
+  );
+  const configuredPreviewUrls = getConfiguredPreviewUrls(
+    activeProjectScripts,
+    scriptPorts.data?.ports,
+  );
 
   useEffect(() => {
     if (!activeThreadRef || !activeEnvironmentBootstrapComplete) return;
@@ -3420,71 +3447,117 @@ export default function ChatView(props: ChatViewProps) {
       });
     }
     const targetCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
+    const targetWorktreePath = options?.worktreePath ?? activeThread.worktreePath ?? null;
+    let previewPort: number | undefined;
+    if (projectScriptReservesPort(script)) {
+      const result = await getScriptPorts({
+        environmentId,
+        input: { cwd: targetWorktreePath ?? activeProject.workspaceRoot, scriptIds: [script.id] },
+      });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          setThreadError(
+            activeThreadId,
+            error instanceof Error ? error.message : "Could not assign a preview port.",
+          );
+        }
+        return;
+      }
+      previewPort = result.value.ports[script.id];
+    }
     const baseTerminalId =
-      terminalUiState.activeTerminalId || activeKnownTerminalIds[0] || DEFAULT_THREAD_TERMINAL_ID;
+      previewPort !== undefined
+        ? projectScriptTerminalId(previewPort)
+        : terminalUiState.activeTerminalId ||
+          activeKnownTerminalIds[0] ||
+          DEFAULT_THREAD_TERMINAL_ID;
     const isBaseTerminalBusy = runningTerminalIds.includes(baseTerminalId);
     const wantsNewTerminal = Boolean(options?.preferNewTerminal) || isBaseTerminalBusy;
     const shouldCreateNewTerminal =
-      wantsNewTerminal ||
-      !canReuseTerminal ||
-      !readEnvironmentScope(environmentId, AuthTerminalReadScope);
-    const targetWorktreePath = options?.worktreePath ?? activeThread.worktreePath ?? null;
+      previewPort === undefined &&
+      (wantsNewTerminal ||
+        !canReuseTerminal ||
+        !readEnvironmentScope(environmentId, AuthTerminalReadScope));
+
+    const runningScriptTerminal =
+      previewPort === undefined
+        ? undefined
+        : knownEnvironmentTerminalSessions?.find(
+            (session) =>
+              session.target.terminalId === baseTerminalId &&
+              (session.state.summary?.status === "starting" || session.state.hasRunningSubprocess),
+          );
 
     setTerminalUiLaunchContext({
       threadId: activeThreadId,
       cwd: targetCwd,
       worktreePath: targetWorktreePath,
     });
-    setTerminalOpen(true);
-    if (!activeThreadRef) {
-      return;
-    }
-    setTerminalFocusRequestId((value) => value + 1);
-
-    const launched = terminalActions.launchTerminal({
-      place: (terminalId) =>
-        shouldCreateNewTerminal
-          ? storeNewTerminal(activeThreadRef, terminalId)
-          : storeSetActiveTerminal(activeThreadRef, terminalId),
-      ...(shouldCreateNewTerminal
-        ? { size: { cols: SCRIPT_TERMINAL_COLS, rows: SCRIPT_TERMINAL_ROWS } }
-        : { terminalId: baseTerminalId }),
-      location: { cwd: targetCwd, worktreePath: targetWorktreePath },
-      ...(options?.env ? { extraEnv: options.env } : {}),
-    });
-    if (!launched) return;
-    const targetTerminalId = launched.terminalId;
-    const openResult = await launched.result;
-    if (openResult._tag === "Failure") {
-      if (!isAtomCommandInterrupted(openResult)) {
-        const error = squashAtomCommandFailure(openResult);
-        setThreadError(
-          activeThreadId,
-          error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
-        );
-      }
-      return;
+    if (!activeThreadRef) return;
+    if (!runningScriptTerminal || runningScriptTerminal.target.threadId === activeThreadId) {
+      setTerminalOpen(true);
+      setTerminalFocusRequestId((value) => value + 1);
     }
 
-    const writeResult = await terminalActions.writeToTerminal(
-      targetTerminalId,
-      `${script.command}\r`,
-    );
-    if (!writeResult) return;
-    if (writeResult._tag === "Failure") {
-      if (!isAtomCommandInterrupted(writeResult)) {
-        const error = squashAtomCommandFailure(writeResult);
-        setThreadError(
-          activeThreadId,
-          error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
-        );
+    if (runningScriptTerminal) {
+      if (runningScriptTerminal.target.threadId === activeThreadId) {
+        storeEnsureTerminal(activeThreadRef, baseTerminalId, { open: true, active: true });
       }
-      return;
+    } else {
+      const launched = terminalActions.launchTerminal({
+        place: (terminalId) =>
+          previewPort !== undefined
+            ? storeEnsureTerminal(activeThreadRef, terminalId, { open: true, active: true })
+            : shouldCreateNewTerminal
+              ? storeNewTerminal(activeThreadRef, terminalId)
+              : storeSetActiveTerminal(activeThreadRef, terminalId),
+        ...(shouldCreateNewTerminal
+          ? { size: { cols: SCRIPT_TERMINAL_COLS, rows: SCRIPT_TERMINAL_ROWS } }
+          : { terminalId: baseTerminalId }),
+        location: { cwd: targetCwd, worktreePath: targetWorktreePath },
+        extraEnv: {
+          ...options?.env,
+          ...(previewPort === undefined ? {} : { T3CODE_PREVIEW_PORT: String(previewPort) }),
+        },
+      });
+      if (!launched) return;
+      const targetTerminalId = launched.terminalId;
+      const openResult = await launched.result;
+      if (openResult._tag === "Failure") {
+        if (!isAtomCommandInterrupted(openResult)) {
+          const error = squashAtomCommandFailure(openResult);
+          setThreadError(
+            activeThreadId,
+            error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
+          );
+        }
+        return;
+      }
+
+      const writeResult = await terminalActions.writeToTerminal(
+        targetTerminalId,
+        `${script.command}\r`,
+      );
+      if (!writeResult) return;
+      if (writeResult._tag === "Failure") {
+        if (!isAtomCommandInterrupted(writeResult)) {
+          const error = squashAtomCommandFailure(writeResult);
+          setThreadError(
+            activeThreadId,
+            error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
+          );
+        }
+        return;
+      }
     }
-    if (script.autoOpenPreview && script.previewUrl && isPreviewSupportedInRuntime()) {
+    if (script.autoOpenPreview && script.previewUrl && browserAvailable) {
       const previewResult = await openUrlInPreview({
         threadRef: activeThreadRef,
-        url: resolveDiscoveredServerUrl(activeThreadRef.environmentId, script.previewUrl),
+        url: resolveDiscoveredServerUrl(
+          activeThreadRef.environmentId,
+          projectScriptPreviewUrl(script, previewPort) ?? script.previewUrl,
+        ),
         openPreview,
       });
       if (previewResult._tag === "Failure" && !isAtomCommandInterrupted(previewResult)) {

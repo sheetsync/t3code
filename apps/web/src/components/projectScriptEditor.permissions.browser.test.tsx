@@ -56,6 +56,7 @@ const request: ProjectScriptEditorRequest = {
     runOnSettle: false,
     keybinding: "mod+k",
     previewUrl: null,
+    reservePort: false,
     autoOpenPreview: false,
   },
 };
@@ -115,6 +116,28 @@ describe("ProjectScriptEditorDialog", () => {
     document.querySelector<HTMLInputElement>("#script-keybinding")!.focus();
     await userEvent.keyboard(keys);
   }
+
+  it("ProjectScriptEditor-afterRemovingPreviewUrl-clearsPortReservation", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(AsyncResult.success(undefined));
+    await openEditor(onSubmit, {
+      ...request,
+      initial: {
+        ...request.initial,
+        previewUrl: "http://localhost:${T3CODE_PREVIEW_PORT}",
+        reservePort: true,
+      },
+    });
+
+    const previewUrl = document.querySelector<HTMLInputElement>("#script-preview-url")!;
+    await userEvent.clear(previewUrl);
+    await userEvent.type(previewUrl, "http://localhost:5173");
+    await submit();
+
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      "test",
+      expect.objectContaining({ previewUrl: "http://localhost:5173", reservePort: false }),
+    );
+  });
 
   it.each([null, "test"])(
     "saves a settings action without task access (id: %s)",

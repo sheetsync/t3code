@@ -18,7 +18,8 @@ describe("T3ProjectFile", () => {
           command: "pnpm dev",
           icon: "play",
           runOnWorktreeCreate: false,
-          previewUrl: "http://localhost:3000",
+          previewUrl: "http://localhost:${T3CODE_PREVIEW_PORT}",
+          reservePort: true,
           autoOpenPreview: true,
         },
         { name: "Test", command: "pnpm test" },
@@ -28,6 +29,7 @@ describe("T3ProjectFile", () => {
 
     expect(decoded.iconPath).toBe("assets/logo.svg");
     expect(decoded.scripts).toHaveLength(3);
+    expect(decoded.scripts?.[0]?.reservePort).toBe(true);
     expect(decoded.scripts?.[1]).toEqual({ name: "Test", command: "pnpm test" });
     expect(decoded.scripts?.[2]?.async).toBe(false);
   });

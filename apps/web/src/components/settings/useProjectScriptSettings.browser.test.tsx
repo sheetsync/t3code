@@ -75,6 +75,7 @@ const input = (keybinding: string | null): NewProjectScriptInput => ({
   runOnSettle: false,
   keybinding,
   previewUrl: null,
+  reservePort: false,
   autoOpenPreview: false,
 });
 

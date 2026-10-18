@@ -186,6 +186,7 @@ export class TerminalManager extends Context.Service<
     readonly subscribeMetadata: (
       listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void>;
+    readonly readMetadata: Effect.Effect<ReadonlyArray<TerminalSummary>>;
   }
 >()("t3/terminal/Manager/TerminalManager") {}
 
@@ -3146,6 +3147,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     closeIdle,
     subscribe,
     subscribeMetadata,
+    readMetadata: readAllTerminalMetadata(),
   });
 });
 

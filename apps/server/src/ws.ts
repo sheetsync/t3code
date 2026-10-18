@@ -180,6 +180,7 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as ProjectScriptPorts from "./project/ProjectScriptPorts.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
@@ -1243,6 +1244,7 @@ const layerWsRpc = (
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const terminalManager = yield* TerminalManager.TerminalManager;
+      const projectScriptPorts = yield* ProjectScriptPorts.ProjectScriptPorts;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -2594,6 +2596,7 @@ const layerWsRpc = (
             Effect.tap(() => repositoryIdentityResolver.resolve(input.cwd, { refresh: true })),
             Effect.tap(() => refreshGitStatus(input.cwd)),
           ),
+        [WS_METHODS.projectsGetScriptPorts]: (input) => projectScriptPorts.get(input),
         [WS_METHODS.projectsSearchEntries]: (input) =>
           workspaceEntries.search(input).pipe(
             Effect.mapError(
